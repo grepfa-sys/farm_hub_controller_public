@@ -1,0 +1,8 @@
+{
+  "__comment_topic": "$aws/things/test_dev_2/shadow/name/channels/update",
+  "state": {
+    "desired": {
+      "motor-1": -1.0
+    }
+  }
+}

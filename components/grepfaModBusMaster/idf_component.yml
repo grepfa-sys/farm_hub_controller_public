@@ -1,0 +1,4 @@
+dependencies:
+  espressif/esp-modbus: "^1.0.11"
+  idf:
+    version: ">=4.1.0"
