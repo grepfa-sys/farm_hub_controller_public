@@ -32,6 +32,10 @@ extern "C" void app_main(void)
                     .ssid = "sys2.4G",
                     .password = "shin0114"
             },
+            .sntp_config = {
+                    .sntp_server1 = "time.windows.com",
+                    .sntp_server2 = "pool.ntp.org",
+            },
             .connect_retry_num = 5
     };
 

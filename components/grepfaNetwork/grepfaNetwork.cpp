@@ -1,6 +1,7 @@
 const char* TAG = "GrepfaConnector";
 
 #include <lwip/netdb.h>
+#include <esp_netif_sntp.h>
 #include "grepfaNetwork.h"
 
 typedef enum {
@@ -13,6 +14,8 @@ esp_err_t GrepfaNetworkConnector::Connect(grepfa_connect_option_t *opt) {
     ESP_LOGI(TAG, "start connector");
 
     memcpy(&option, opt, sizeof(grepfa_connect_option_t));
+
+    setSNTP();
 
     esp_err_t err = ESP_OK;
 
@@ -30,6 +33,7 @@ esp_err_t GrepfaNetworkConnector::Connect(grepfa_connect_option_t *opt) {
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "err code: 0x%x", err);
+        return err;
     }
 
     return ESP_OK;
@@ -239,4 +243,13 @@ esp_err_t GrepfaNetworkConnector::setStatic() {
         return err;
     }
     return ESP_OK;
+}
+
+esp_err_t GrepfaNetworkConnector::setSNTP() {
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(2,
+              ESP_SNTP_SERVER_LIST(option.sntp_config.sntp_server1, option.sntp_config.sntp_server2 ) );
+    config.ip_event_to_renew = option.connection_type == WIFI ? IP_EVENT_STA_GOT_IP : IP_EVENT_ETH_GOT_IP;
+    esp_netif_sntp_init(&config);
+
+    return 0;
 }

@@ -37,11 +37,19 @@ typedef struct {
 }grepfa_connect_wifi_t;
 
 typedef struct {
+    const char * sntp_server1;
+    const char * sntp_server2;
+
+}grepfa_sntp_config_t;
+
+typedef struct {
     grepfa_connect_type_t connection_type;              // WiFi, Ethernet
     grepfa_connect_ip_option_t ip_option;               // Dynamic vs Static
     grepfa_connect_static_ip_option_t static_ip_option; // Only use on static
     grepfa_connect_dns_option_t dns_option;             // DNS Option
     grepfa_connect_wifi_t wifi_option;                  // Wi-Fi Option
+
+    grepfa_sntp_config_t sntp_config;
 
     int connect_retry_num;
 }grepfa_connect_option_t;
@@ -61,6 +69,8 @@ private:
 
     esp_err_t setStatic();
     esp_err_t setDNS();
+
+    esp_err_t setSNTP();
 
     static void wifi_ev_handler (void* arg, esp_event_base_t event_base,
                                  int32_t event_id, void* event_data);
