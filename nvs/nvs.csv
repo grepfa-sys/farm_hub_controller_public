@@ -1,0 +1,7 @@
+key,type,encoding,value
+grepfa,namespace,,
+broker_ep,data,string,mqtts://iot.grepfa.net
+dev_id,data,string,test_dev_3
+pop,data,string,grepfa
+username,data,string,grepfa
+service_key,data,string,grepfa1234
