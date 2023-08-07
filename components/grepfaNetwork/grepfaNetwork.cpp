@@ -2,254 +2,179 @@ const char* TAG = "GrepfaConnector";
 
 #include <lwip/netdb.h>
 #include <esp_netif_sntp.h>
+#include <protocomm_security.h>
+#include <wifi_provisioning/manager.h>
+#include <wifi_provisioning/scheme_softap.h>
 #include "grepfaNetwork.h"
-
-typedef enum {
-    CONNECTED = BIT0,
-    FAIL = BIT1
-} connector_event_type_t;
+#include <ArduinoJson.h>
 
 
-esp_err_t GrepfaNetworkConnector::Connect(grepfa_connect_option_t *opt) {
-    ESP_LOGI(TAG, "start connector");
+#define CONNECTED BIT0
+#define FAIL BIT1
 
-    memcpy(&option, opt, sizeof(grepfa_connect_option_t));
-
-    setSNTP();
-
-    esp_err_t err = ESP_OK;
-
-    switch (option.connection_type) {
-        case WIFI:
-            ESP_LOGI(TAG, "start connect wifi");
-            err = wifiInit();
-            break;
-        case ETHERNET:
-            ESP_LOGE(TAG, "ethernet not support");
-            break;
-        default:
-            err = ESP_ERR_INVALID_ARG;
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "err code: 0x%x", err);
-        return err;
-    }
-
-    return ESP_OK;
+static void get_device_service_name(char *service_name, size_t max)
+{
+    uint8_t eth_mac[6];
+    const char *ssid_prefix = "PROV_";
+    esp_wifi_get_mac(WIFI_IF_STA, eth_mac);
+    snprintf(service_name, max, "%s%02X%02X%02X",
+             ssid_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
 }
 
-esp_err_t GrepfaNetworkConnector::commonInit() {
-    esp_err_t err;
-    connector_event_group = xEventGroupCreate();
+GrepfaConnector::GrepfaConnector() {
+    get_device_service_name(service_name, sizeof(service_name));
+    esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &wifi_prov_handler, this);
+    esp_event_handler_register(PROTOCOMM_SECURITY_SESSION_EVENT, ESP_EVENT_ANY_ID, &protocomm_event_handler, this);
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, this);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, this);
+    esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &ethernet_event_handler, this);
+
+    esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    // TODO:: ETH Config
+
+    wifi_prov_mgr_config_t  config = {
+            .scheme = wifi_prov_scheme_softap,
+            .scheme_event_handler = WIFI_PROV_EVENT_HANDLER_NONE
+    };
+
+    wifi_prov_mgr_init(config);
+}
+
+esp_err_t GrepfaConnector::resetProvisioning() {
+    return wifi_prov_mgr_reset_provisioning();
+}
+
+esp_err_t GrepfaConnector::doProvisioning() {
+    wifi_prov_mgr_is_provisioned(&provisioned);
+
+    if (!provisioned) {
+        ESP_LOGI(TAG, "Starting provisioning");
+        wifi_prov_security_t security = WIFI_PROV_SECURITY_1;
+        wifi_prov_security1_params_t *sec_params = pop;
+
+        // ethernet, static ip/dns address configuration
+        wifi_prov_mgr_endpoint_create("advanced");
+
+        wifi_prov_mgr_start_provisioning(security, (const void *) sec_params, service_name, service_key);
+
+        wifi_prov_mgr_endpoint_register("advanced", advanced_ip_prov_data_handler, this);
+    } else {
+        ESP_LOGI(TAG, "Already provisioned");
+        wifi_prov_mgr_deinit();
+
+        // TODO:: Do connect
+    }
+
     return 0;
 }
 
-esp_err_t GrepfaNetworkConnector::wifiInit() {
-    esp_err_t err = commonInit();
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    ni = esp_netif_create_default_wifi_sta();
-
-    // set static address if option set static ip
-    if (option.ip_option == STATIC_IP) {
-        err = setStatic();
-        if(err != ESP_OK) {
-            ESP_LOGE(TAG, "configuration static ip error - 0x%x", err);
-            return err;
+void GrepfaConnector::wifi_prov_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    auto id = (wifi_prov_cb_event_t) event_id;
+    switch (id) {
+        case WIFI_PROV_START:
+            ESP_LOGI(TAG, "Provisioning start");
+            break;
+        case WIFI_PROV_CRED_RECV:
+        {
+            auto *wifi_sta_cfg = (wifi_sta_config_t *)event_data;
+            ESP_LOGI(TAG, "Received Wi-Fi credentials"
+                          "\n\tSSID     : %s\n\tPassword : %s",
+                     (const char *) wifi_sta_cfg->ssid,
+                     (const char *) wifi_sta_cfg->password);
         }
-    }
-
-    // set static dns server if option set static dns
-    if (option.ip_option == DYNAMIC_IP_STATIC_DNS || option.ip_option == STATIC_IP) {
-        err = setDNS();
-        if(err != ESP_OK) {
-            ESP_LOGE(TAG, "configuration DNS error - 0x%x", err);
-            return err;
+            break;
+        case WIFI_PROV_CRED_FAIL:
+        {
+            auto *reason = (wifi_prov_sta_fail_reason_t *)event_data;
+            ESP_LOGE(TAG, "Provisioning failed!\n\tReason : %s"
+                          "\n\tPlease reset to factory and retry provisioning",
+                     (*reason == WIFI_PROV_STA_AUTH_ERROR) ?
+                     "Wi-Fi station authentication failed" : "Wi-Fi access-point not found");
+            break;
         }
+        case WIFI_PROV_CRED_SUCCESS:
+            ESP_LOGI(TAG, "Provisioning successful");
+            break;
+        case WIFI_PROV_END:
+            wifi_prov_mgr_deinit();
+            break;
+        default:
+            break;
     }
+}
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "wifi init fail - 0x%x", err);
-        return err;
+void GrepfaConnector::wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    auto id = (wifi_event_t) event_id;
+
+    switch (id) {
+        case WIFI_EVENT_STA_START:
+            esp_wifi_connect();
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            ESP_LOGI(TAG, "Disconnected. Connecting to the AP again...");
+            esp_wifi_connect();
+            break;
+            case WIFI_EVENT_AP_STACONNECTED:
+                ESP_LOGI(TAG, "SoftAP transport: Connected!");
+                break;
+            case WIFI_EVENT_AP_STADISCONNECTED:
+                ESP_LOGI(TAG, "SoftAP transport: Disconnected!");
+                break;
+        default:
+            break;
     }
+}
 
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
+void GrepfaConnector::ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    auto* it = (GrepfaConnector*) arg;
+    auto* event = (ip_event_got_ip_t*) event_data;
+    auto id = (ip_event_t) event_id;
+    ESP_LOGI(TAG, "Connected with IP Address:" IPSTR, IP2STR(&event->ip_info.ip));
+    xEventGroupSetBits(it->connector_event_group, CONNECTED);
+}
 
-
-    err = esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_ev_handler,
-                                                        this,
-                                                        &instance_any_id);
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, " - 0x%x", err);
-        return err;
+esp_err_t GrepfaConnector::advanced_ip_prov_data_handler(uint32_t session_id, const uint8_t *inbuf, ssize_t inlen,
+                                                         uint8_t **outbuf, ssize_t *outlen, void *priv_data) {
+    if (inbuf) {
+        ESP_LOGI(TAG, "Received data: %.*s", inlen, (char *)inbuf);;
     }
-
-    err = esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_ev_handler,
-                                                        this,
-                                                        &instance_got_ip);
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, " - 0x%x", err);
-        return err;
+    char response[] = "SUCCESS";
+    *outbuf = (uint8_t *)strdup(response);
+    if (*outbuf == NULL) {
+        ESP_LOGE(TAG, "System out of memory");
+        return ESP_ERR_NO_MEM;
     }
+    *outlen = strlen(response) + 1; /* +1 for NULL terminating byte */
 
-
-
-    wifi_config_t wifi_config = {
-            .sta = {
-                .scan_method = WIFI_ALL_CHANNEL_SCAN
-            }
-    };
-
-    strncpy(reinterpret_cast<char *>(wifi_config.sta.ssid), option.wifi_option.ssid, 32);
-    strncpy(reinterpret_cast<char *>(wifi_config.sta.password), option.wifi_option.password, 64);
-
-    err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "wifi set mode fail - 0x%x", err);
-        return err;
-    }
-
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "wifi init fail - 0x%x", err);
-        return err;
-    }
-
-    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "wifi set config fail - 0x%x", err);
-        return err;
-    }
-
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, " - 0x%x", err);
-    }
-
-    err = esp_wifi_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "wifi start fail - 0x%x", err);
-        return err;
-    }
-
-
-    ESP_LOGI(TAG, "wifi initialization done");
-    EventBits_t bits = xEventGroupWaitBits(connector_event_group,
-                                           CONNECTED | FAIL,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           portMAX_DELAY);
-
-    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
- * happened. */
-    if (bits & CONNECTED) {
-        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
-                 option.wifi_option.ssid, option.wifi_option.password);
-    } else if (bits & FAIL) {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s",
-                 option.wifi_option.ssid, option.wifi_option.password);
-    } else {
-        ESP_LOGE(TAG, "UNEXPECTED EVENT");
-        return ESP_FAIL;
-    }
-    return ESP_OK;
+    return 0;
 }
 
 void
-GrepfaNetworkConnector::wifi_ev_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-    auto it = (GrepfaNetworkConnector*) arg;
+GrepfaConnector::protocomm_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    auto id = (protocomm_security_session_event_t) event_id;
+    switch (id) {
 
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    }
-    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (it->retry_num < it->option.connect_retry_num) {
-            esp_wifi_connect();
-            it->retry_num++;
-            ESP_LOGI(TAG, "retry to connect to the AP");
-        } else {
-            xEventGroupSetBits(it->connector_event_group, FAIL);
-        }
-        ESP_LOGI(TAG,"connect to the AP fail");
-    }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        auto* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        it->retry_num = 0;
-        xEventGroupSetBits(it->connector_event_group, CONNECTED);
+        case PROTOCOMM_SECURITY_SESSION_SETUP_OK:
+            ESP_LOGI(TAG, "Secured session established!");
+            break;
+        case PROTOCOMM_SECURITY_SESSION_INVALID_SECURITY_PARAMS:
+            ESP_LOGE(TAG, "Received invalid security parameters for establishing secure session!");
+            break;
+        case PROTOCOMM_SECURITY_SESSION_CREDENTIALS_MISMATCH:
+            ESP_LOGE(TAG, "Received incorrect username and/or PoP for establishing secure session!");
+            break;
     }
 }
 
-esp_err_t GrepfaNetworkConnector::setDNS() {
-    esp_err_t err = ESP_OK;
-    if (option.dns_option.main_dns_address && (option.dns_option.main_dns_address != IPADDR_NONE)) {
-        esp_netif_dns_info_t dns;
-        dns.ip.u_addr.ip4.addr = option.dns_option.main_dns_address;
-        dns.ip.type = IPADDR_TYPE_V4;
-        err = esp_netif_set_dns_info(ni, ESP_NETIF_DNS_MAIN, &dns);
-    }
+void
+GrepfaConnector::ethernet_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
 
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "configuration main dns fail");
-        return err;
-    }
-
-    if (option.dns_option.backup_dns_address && (option.dns_option.backup_dns_address != IPADDR_NONE)) {
-
-        esp_netif_dns_info_t dns;
-        dns.ip.u_addr.ip4.addr = option.dns_option.backup_dns_address;
-        dns.ip.type = IPADDR_TYPE_V4;
-        err = esp_netif_set_dns_info(ni, ESP_NETIF_DNS_BACKUP, &dns);
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "configuration main dns fail");
-        return err;
-    }
-
-    return ESP_OK;
 }
 
-esp_err_t GrepfaNetworkConnector::setStatic() {
-    esp_err_t err = esp_netif_dhcpc_stop(ni);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "configuration static ip error - 0x%x", err);
-        return err;
-    }
 
-    esp_netif_ip_info_t ip;
-    memset(&ip, 0 , sizeof(esp_netif_ip_info_t));
-
-    ip.ip.addr = option.static_ip_option.ip_address;
-    ip.netmask.addr = option.static_ip_option.netmask_address;
-    ip.gw.addr = option.static_ip_option.gateway_address;
-
-    err = esp_netif_set_ip_info(ni, &ip);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "configuration static ip error - 0x%x", err);
-        return err;
-    }
-    return ESP_OK;
-}
-
-esp_err_t GrepfaNetworkConnector::setSNTP() {
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(2,
-              ESP_SNTP_SERVER_LIST(option.sntp_config.sntp_server1, option.sntp_config.sntp_server2 ) );
-    config.ip_event_to_renew = option.connection_type == WIFI ? IP_EVENT_STA_GOT_IP : IP_EVENT_ETH_GOT_IP;
-    esp_netif_sntp_init(&config);
-
-    return 0;
-}

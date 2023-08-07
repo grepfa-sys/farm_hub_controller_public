@@ -31,10 +31,6 @@ typedef struct {
     uint32_t backup_dns_address;
 }grepfa_connect_dns_option_t;
 
-typedef struct {
-    char ssid[32];
-    char password[64];
-}grepfa_connect_wifi_t;
 
 typedef struct {
     const char * sntp_server1;
@@ -47,7 +43,6 @@ typedef struct {
     grepfa_connect_ip_option_t ip_option;               // Dynamic vs Static
     grepfa_connect_static_ip_option_t static_ip_option; // Only use on static
     grepfa_connect_dns_option_t dns_option;             // DNS Option
-    grepfa_connect_wifi_t wifi_option;                  // Wi-Fi Option
 
     grepfa_sntp_config_t sntp_config;
 
@@ -55,28 +50,35 @@ typedef struct {
 }grepfa_connect_option_t;
 
 
-class GrepfaNetworkConnector {
+class GrepfaConnector {
 private:
-    grepfa_connect_option_t option = {};
-    EventGroupHandle_t connector_event_group = nullptr;
+    bool provisioned = false;
+    char service_name[12];
 
-    esp_netif_t * ni = nullptr;
-    int retry_num = 0;
+    // TODO:: Read from nvs
+    const char* pop = "avcd1234";
+    const char* username = "grepfa";
+    const char* service_key = "grepfa1234";
 
-    esp_err_t commonInit();
-    esp_err_t wifiInit();
-    esp_err_t ethInit();
+    EventGroupHandle_t connector_event_group;
 
-    esp_err_t setStatic();
-    esp_err_t setDNS();
+    static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                   int32_t event_id, void* event_data);
+    static void ethernet_event_handler(void* arg, esp_event_base_t event_base,
+                                   int32_t event_id, void* event_data);
+    static void ip_event_handler(void* arg, esp_event_base_t event_base,
+                                   int32_t event_id, void* event_data);
+    static void protocomm_event_handler(void* arg, esp_event_base_t event_base,
+                                   int32_t event_id, void* event_data);
+    static void wifi_prov_handler(void* arg, esp_event_base_t event_base,
+                                   int32_t event_id, void* event_data);
 
-    esp_err_t setSNTP();
 
-    static void wifi_ev_handler (void* arg, esp_event_base_t event_base,
-                                 int32_t event_id, void* event_data);
+    static esp_err_t advanced_ip_prov_data_handler(uint32_t session_id, const uint8_t *inbuf, ssize_t inlen,
+                                       uint8_t **outbuf, ssize_t *outlen, void *priv_data);
 
 public:
-    esp_err_t Connect(grepfa_connect_option_t* opt);
-    esp_err_t ReConnect(grepfa_connect_option_t* opt);
-    esp_err_t DisConnect();
+    GrepfaConnector();
+    esp_err_t doProvisioning();
+    esp_err_t resetProvisioning();
 };
